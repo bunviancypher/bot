@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 import os
 from dotenv import load_dotenv
@@ -6,28 +7,12 @@ import random
 import datetime
 import time
 import asyncio
-from flask import Flask
-
-import threading
-
-app = Flask(__name__)
-
-@app.route("/")
-
-def home():
-
-    return "Bot đang chạy!"
-
-def run_web():
-
-    app.run(host="0.0.0.0", port=8080)
-
-threading.Thread(target=run_web).start()
 
 LOCAL_TZ = datetime.timezone(datetime.timedelta(hours=7))
 
 last_command_times = {}
 last_message_time = {}  # Track last message time per channel
+spam_tasks = {}  # Track active spam tasks: {user_id: {'stop': bool, 'target': user_id}}
 
 load_dotenv()
 
@@ -35,7 +20,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 intents.members = True
-bot = commands.Bot(command_prefix='b!', intents=intents, help_command=None)
+bot = commands.Bot(command_prefix='/', intents=intents, help_command=None)
 
 # Forbidden words list
 FORBIDDEN_WORDS = [
@@ -97,20 +82,26 @@ IDLE_MESSAGES = [
     '🎯 Fun fact: Bạn có biết rằng con bạch tuộc có 3 trái tim không? 🐙',
     '🌟 Chào mọi người! Server có vẻ yên tĩnh quá nhỉ? 👀',
     '💭 Ai còn thức không? Hãy nói chuyện với mình đi! 😊',
-    '🎲 Có ai muốn chơi game không? Dùng `b!rps` để chơi oẳn tù tì với mình nè!',
-    '🎰 Thử vận may với `b!roll` xem sao! 🍀',
+    '🎲 Có ai muốn chơi game không? Dùng `/rps` để chơi oẳn tù tì với mình nè!',
+    '🎰 Thử vận may với `/roll` xem sao! 🍀',
     '😴 Server vắng quá... có ai ở đây không? 👻'
 ]
 
 # Channel IDs that bot will send idle messages to (set your general channel ID here)
 # Leave empty to send to all text channels, or add specific channel IDs
-IDLE_CHAT_CHANNELS = []
+IDLE_CHAT_CHANNELS = [1001289611470966849, 1374019654758043760, 1001290076363440200]
 
 
 @bot.event
 async def on_ready():
     print(f'✅ Bot đã đăng nhập: {bot.user.name}')
-    await bot.change_presence(activity=discord.Streaming(name="b!help để xem lệnh", url="https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
+    try:
+        synced = await bot.tree.sync()
+        print(f'✅ Đã đồng bộ {len(synced)} slash commands!')
+    except Exception as e:
+        print(f'❌ Lỗi khi đồng bộ commands: {e}')
+
+    await bot.change_presence(activity=discord.Streaming(name="Sử dụng / để xem lệnh", url="https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
     if not idle_chat.is_running():
         idle_chat.start()
         print('✅ Idle chat task started!')
@@ -157,7 +148,7 @@ async def on_message(message):
         return
 
     # Skip forbidden words check for command messages
-    if not message.content.startswith(bot.command_prefix):
+    if not message.content.startswith('/'):
         # Auto-mute for forbidden words
         for word in FORBIDDEN_WORDS:
             if word.lower() in message.content.lower():
@@ -239,7 +230,7 @@ async def on_message(message):
         last_message_time[message.channel.id] = datetime.datetime.now()
 
     # Auto-reply to greetings (only if not a command)
-    if not message.content.startswith(bot.command_prefix):
+    if not message.content.startswith('/'):
         message_lower = message.content.lower().strip()
         for greeting, responses in GREETINGS.items():
             if greeting in message_lower:
@@ -257,9 +248,12 @@ async def on_message(message):
     await bot.process_commands(message)
 
 
-@bot.command(name='announce', help='Gửi thông báo với embed !')
-async def announce(ctx, *, message):
-    user_id = ctx.author.id
+# Slash Commands
+
+@bot.tree.command(name='announce', description='Gửi thông báo với embed đẹp')
+@app_commands.describe(message='Nội dung thông báo')
+async def announce(interaction: discord.Interaction, message: str):
+    user_id = interaction.user.id
     current_time = time.time()
     if user_id in last_command_times and current_time - last_command_times[user_id] < 3:
         embed = discord.Embed(
@@ -267,21 +261,20 @@ async def announce(ctx, *, message):
             description="Vui lòng chờ 3 giây trước khi sử dụng lệnh tiếp theo.",
             color=0xFFFF00
         )
-        await ctx.send(embed=embed, delete_after=3)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     last_command_times[user_id] = current_time
 
     # Check if user has required role
     required_role = 1001322797081034752
-    if not any(role.id == required_role for role in ctx.author.roles):
+    if not any(role.id == required_role for role in interaction.user.roles):
         embed = discord.Embed(
             title="❌ Lỗi",
             description="Bạn không có quyền sử dụng lệnh này!",
             color=0xFF0000
         )
-        return await ctx.send(embed=embed)
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    await ctx.message.delete()
     embed = discord.Embed(
         title="📢 THÔNG BÁO QUAN TRỌNG",
         description=f"**{message}**",
@@ -290,16 +283,17 @@ async def announce(ctx, *, message):
     )
     embed.set_image(
         url="https://media.giphy.com/media/RhrAvDQ8V8moL8AzWF/giphy.gif")
-    embed.set_author(name=ctx.guild.name,
-                     icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
-    embed.set_footer(text=f"Thông báo bởi {ctx.author.name}",
-                     icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
-    await ctx.send(embed=embed)
+    embed.set_author(name=interaction.guild.name,
+                     icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+    embed.set_footer(text=f"Thông báo bởi {interaction.user.name}",
+                     icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name='userinfo', help='Xem thông tin người dùng')
-async def userinfo(ctx, member: discord.Member = None):
-    user_id = ctx.author.id
+@bot.tree.command(name='userinfo', description='Xem thông tin người dùng')
+@app_commands.describe(member='Người dùng muốn xem thông tin')
+async def userinfo(interaction: discord.Interaction, member: discord.Member = None):
+    user_id = interaction.user.id
     current_time = time.time()
     if user_id in last_command_times and current_time - last_command_times[user_id] < 3:
         embed = discord.Embed(
@@ -307,11 +301,11 @@ async def userinfo(ctx, member: discord.Member = None):
             description="Vui lòng chờ 3 giây trước khi sử dụng lệnh tiếp theo.",
             color=0xFFFF00
         )
-        await ctx.send(embed=embed, delete_after=3)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     last_command_times[user_id] = current_time
 
-    member = member or ctx.author
+    member = member or interaction.user
 
     embed = discord.Embed(
         title=f"👤 THÔNG TIN NGƯỜI DÙNG",
@@ -332,12 +326,12 @@ async def userinfo(ctx, member: discord.Member = None):
     embed.set_footer(text="Bot Discord",
                      icon_url=bot.user.avatar.url if bot.user.avatar else None)
 
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name='serverinfo', help='Xem thông tin server')
-async def serverinfo(ctx):
-    user_id = ctx.author.id
+@bot.tree.command(name='serverinfo', description='Xem thông tin server')
+async def serverinfo(interaction: discord.Interaction):
+    user_id = interaction.user.id
     current_time = time.time()
     if user_id in last_command_times and current_time - last_command_times[user_id] < 3:
         embed = discord.Embed(
@@ -345,11 +339,11 @@ async def serverinfo(ctx):
             description="Vui lòng chờ 3 giây trước khi sử dụng lệnh tiếp theo.",
             color=0xFFFF00
         )
-        await ctx.send(embed=embed, delete_after=3)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     last_command_times[user_id] = current_time
 
-    guild = ctx.guild
+    guild = interaction.guild
     embed = discord.Embed(
         title=f"🏰 THÔNG TIN SERVER",
         description=f"**{guild.name}**",
@@ -368,12 +362,13 @@ async def serverinfo(ctx):
     embed.set_footer(text="Bot Discord",
                      icon_url=bot.user.avatar.url if bot.user.avatar else None)
 
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name='roll', help='Lắc xúc xắc')
-async def roll(ctx, sides: int = 6):
-    user_id = ctx.author.id
+@bot.tree.command(name='roll', description='Lắc xúc xắc')
+@app_commands.describe(sides='Số mặt của xúc xắc (mặc định: 6)')
+async def roll(interaction: discord.Interaction, sides: int = 6):
+    user_id = interaction.user.id
     current_time = time.time()
     if user_id in last_command_times and current_time - last_command_times[user_id] < 3:
         embed = discord.Embed(
@@ -381,7 +376,7 @@ async def roll(ctx, sides: int = 6):
             description="Vui lòng chờ 3 giây trước khi sử dụng lệnh tiếp theo.",
             color=0xFFFF00
         )
-        await ctx.send(embed=embed, delete_after=3)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     last_command_times[user_id] = current_time
 
@@ -393,14 +388,15 @@ async def roll(ctx, sides: int = 6):
         timestamp=datetime.datetime.now(LOCAL_TZ)
     )
     embed.set_thumbnail(url=random.choice(GIFS['fun']))
-    embed.set_footer(text=f"Người lắc: {ctx.author.name}",
-                     icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
-    await ctx.send(embed=embed)
+    embed.set_footer(text=f"Người lắc: {interaction.user.name}",
+                     icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name='8ball', help='Hỏi câu hỏi và nhận câu trả lời ngẫu nhiên')
-async def eightball(ctx, *, question):
-    user_id = ctx.author.id
+@bot.tree.command(name='8ball', description='Hỏi câu hỏi và nhận câu trả lời ngẫu nhiên')
+@app_commands.describe(question='Câu hỏi của bạn')
+async def eightball(interaction: discord.Interaction, question: str):
+    user_id = interaction.user.id
     current_time = time.time()
     if user_id in last_command_times and current_time - last_command_times[user_id] < 3:
         embed = discord.Embed(
@@ -408,7 +404,7 @@ async def eightball(ctx, *, question):
             description="Vui lòng chờ 3 giây trước khi sử dụng lệnh tiếp theo.",
             color=0xFFFF00
         )
-        await ctx.send(embed=embed, delete_after=3)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     last_command_times[user_id] = current_time
 
@@ -428,14 +424,14 @@ async def eightball(ctx, *, question):
     embed.add_field(name="❓ Câu hỏi", value=f"*{question}*", inline=False)
     embed.add_field(name="🔮 Lời tiên tri",
                     value=f"**{random.choice(responses)}**", inline=False)
-    embed.set_footer(text=f"Người hỏi: {ctx.author.name}",
-                     icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
-    await ctx.send(embed=embed)
+    embed.set_footer(text=f"Người hỏi: {interaction.user.name}",
+                     icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name='coinflip', help='Tung đồng xu')
-async def coinflip(ctx):
-    user_id = ctx.author.id
+@bot.tree.command(name='coinflip', description='Tung đồng xu')
+async def coinflip(interaction: discord.Interaction):
+    user_id = interaction.user.id
     current_time = time.time()
     if user_id in last_command_times and current_time - last_command_times[user_id] < 3:
         embed = discord.Embed(
@@ -443,7 +439,7 @@ async def coinflip(ctx):
             description="Vui lòng chờ 3 giây trước khi sử dụng lệnh tiếp theo.",
             color=0xFFFF00
         )
-        await ctx.send(embed=embed, delete_after=3)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     last_command_times[user_id] = current_time
 
@@ -456,14 +452,15 @@ async def coinflip(ctx):
     )
     embed.set_image(
         url="https://media.giphy.com/media/a8TIlyVS7JixO/giphy.gif")
-    embed.set_footer(text=f"Người tung: {ctx.author.name}",
-                     icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
-    await ctx.send(embed=embed)
+    embed.set_footer(text=f"Người tung: {interaction.user.name}",
+                     icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name='clear', help='Xóa tin nhắn')
-async def clear(ctx, amount: int):
-    user_id = ctx.author.id
+@bot.tree.command(name='clear', description='Xóa tin nhắn')
+@app_commands.describe(amount='Số lượng tin nhắn cần xóa')
+async def clear(interaction: discord.Interaction, amount: int):
+    user_id = interaction.user.id
     current_time = time.time()
     if user_id in last_command_times and current_time - last_command_times[user_id] < 3:
         embed = discord.Embed(
@@ -471,21 +468,23 @@ async def clear(ctx, amount: int):
             description="Vui lòng chờ 3 giây trước khi sử dụng lệnh tiếp theo.",
             color=0xFFFF00
         )
-        await ctx.send(embed=embed, delete_after=3)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     last_command_times[user_id] = current_time
 
     # Check if user has required role
     required_role = 1001322797081034752
-    if not any(role.id == required_role for role in ctx.author.roles):
+    if not any(role.id == required_role for role in interaction.user.roles):
         embed = discord.Embed(
             title="❌ Lỗi",
             description="Bạn không có quyền sử dụng lệnh này!",
             color=0xFF0000
         )
-        return await ctx.send(embed=embed)
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    await ctx.channel.purge(limit=amount + 1)
+    await interaction.response.defer()
+    await interaction.channel.purge(limit=amount)
+
     embed = discord.Embed(
         title="🧹 DỌN DẸP THÀNH CÔNG",
         description=f"✅ Đã xóa **{amount}** tin nhắn!",
@@ -494,12 +493,13 @@ async def clear(ctx, amount: int):
     )
     embed.set_thumbnail(
         url="https://media.giphy.com/media/l0MYAiPEXANiJMFMY/giphy.gif")
-    await ctx.send(embed=embed, delete_after=5)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-@bot.command(name='avatar', help='Xem avatar của người dùng')
-async def avatar(ctx, member: discord.Member = None):
-    user_id = ctx.author.id
+@bot.tree.command(name='avatar', description='Xem avatar của người dùng')
+@app_commands.describe(member='Người dùng muốn xem avatar')
+async def avatar(interaction: discord.Interaction, member: discord.Member = None):
+    user_id = interaction.user.id
     current_time = time.time()
     if user_id in last_command_times and current_time - last_command_times[user_id] < 3:
         embed = discord.Embed(
@@ -507,11 +507,11 @@ async def avatar(ctx, member: discord.Member = None):
             description="Vui lòng chờ 3 giây trước khi sử dụng lệnh tiếp theo.",
             color=0xFFFF00
         )
-        await ctx.send(embed=embed, delete_after=3)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     last_command_times[user_id] = current_time
 
-    member = member or ctx.author
+    member = member or interaction.user
     embed = discord.Embed(
         title=f"🖼️ AVATAR",
         description=f"**{member.mention}**",
@@ -519,14 +519,14 @@ async def avatar(ctx, member: discord.Member = None):
         timestamp=datetime.datetime.now(LOCAL_TZ)
     )
     embed.set_image(url=member.avatar.url if member.avatar else None)
-    embed.set_footer(text=f"Yêu cầu bởi {ctx.author.name}",
-                     icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
-    await ctx.send(embed=embed)
+    embed.set_footer(text=f"Yêu cầu bởi {interaction.user.name}",
+                     icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name='meme', help='Gửi meme ngẫu nhiên')
-async def meme(ctx):
-    user_id = ctx.author.id
+@bot.tree.command(name='meme', description='Gửi meme ngẫu nhiên')
+async def meme(interaction: discord.Interaction):
+    user_id = interaction.user.id
     current_time = time.time()
     if user_id in last_command_times and current_time - last_command_times[user_id] < 3:
         embed = discord.Embed(
@@ -534,7 +534,7 @@ async def meme(ctx):
             description="Vui lòng chờ 3 giây trước khi sử dụng lệnh tiếp theo.",
             color=0xFFFF00
         )
-        await ctx.send(embed=embed, delete_after=3)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     last_command_times[user_id] = current_time
 
@@ -553,7 +553,6 @@ async def meme(ctx):
         "https://bom.edu.vn/public/upload/2024/12/meme-che-viet-nam-3.webp",
         "https://i.pinimg.com/736x/30/54/ae/3054aee985e2074b742f0769fcf18419.jpg",
         "https://multilanguage.edu.vn/public/upload/2025/01/meme-viet-08.webp",
-        # New memes added
         "https://i.pinimg.com/736x/88/d9/18/88d918a52f1106113b4b5d0aac7be193.jpg",
         "https://i.pinimg.com/736x/91/70/34/917034b8060a599bf193a643db388b79.jpg",
         "https://i.pinimg.com/736x/12/49/63/124963b6b9a488c084ee63b5b7635716.jpg",
@@ -571,14 +570,20 @@ async def meme(ctx):
         timestamp=datetime.datetime.now(LOCAL_TZ)
     )
     embed.set_image(url=random.choice(memes))
-    embed.set_footer(text=f"Yêu cầu bởi {ctx.author.name}",
-                     icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
-    await ctx.send(embed=embed)
+    embed.set_footer(text=f"Yêu cầu bởi {interaction.user.name}",
+                     icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name='rps', help='Chơi oẳn tù tì')
-async def rps(ctx, choice: str):
-    user_id = ctx.author.id
+@bot.tree.command(name='rps', description='Chơi oẳn tù tì')
+@app_commands.describe(choice='Chọn: kéo, búa, hoặc bao')
+@app_commands.choices(choice=[
+    app_commands.Choice(name='✂️ Kéo', value='kéo'),
+    app_commands.Choice(name='🪨 Búa', value='búa'),
+    app_commands.Choice(name='📄 Bao', value='bao')
+])
+async def rps(interaction: discord.Interaction, choice: app_commands.Choice[str]):
+    user_id = interaction.user.id
     current_time = time.time()
     if user_id in last_command_times and current_time - last_command_times[user_id] < 3:
         embed = discord.Embed(
@@ -586,28 +591,21 @@ async def rps(ctx, choice: str):
             description="Vui lòng chờ 3 giây trước khi sử dụng lệnh tiếp theo.",
             color=0xFFFF00
         )
-        await ctx.send(embed=embed, delete_after=3)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     last_command_times[user_id] = current_time
 
     choices = ['kéo', 'búa', 'bao']
     bot_choice = random.choice(choices)
 
-    choice = choice.lower()
-    if choice not in choices:
-        embed = discord.Embed(
-            title="❌ Lỗi",
-            description="Vui lòng chọn: kéo, búa, hoặc bao",
-            color=0xFF0000
-        )
-        return await ctx.send(embed=embed)
+    user_choice = choice.value
 
     result = ""
-    if choice == bot_choice:
+    if user_choice == bot_choice:
         result = "Hòa! 🤝"
-    elif (choice == 'kéo' and bot_choice == 'bao') or \
-         (choice == 'búa' and bot_choice == 'kéo') or \
-         (choice == 'bao' and bot_choice == 'búa'):
+    elif (user_choice == 'kéo' and bot_choice == 'bao') or \
+         (user_choice == 'búa' and bot_choice == 'kéo') or \
+         (user_choice == 'bao' and bot_choice == 'búa'):
         result = "Bạn thắng! 🎉"
     else:
         result = "Bạn thua! 😢"
@@ -620,16 +618,22 @@ async def rps(ctx, choice: str):
     )
     embed.set_thumbnail(
         url="https://media.giphy.com/media/3ohzdFRFAi7zQ0VKKY/giphy.gif")
-    embed.add_field(name="👤 Bạn chọn", value=f"**{choice}**", inline=True)
+    embed.add_field(name="👤 Bạn chọn", value=f"**{user_choice}**", inline=True)
     embed.add_field(name="🤖 Bot chọn", value=f"**{bot_choice}**", inline=True)
-    embed.set_footer(text=f"Người chơi: {ctx.author.name}",
-                     icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
-    await ctx.send(embed=embed)
+    embed.set_footer(text=f"Người chơi: {interaction.user.name}",
+                     icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name='help')
-async def help(ctx):
-    user_id = ctx.author.id
+@bot.tree.command(name='spamdm', description='Spam DM đến một user')
+@app_commands.describe(
+    user='User cần spam DM',
+    amount='Số lượng tin nhắn (1-100000)',
+    delay='Delay giữa mỗi tin nhắn (giây, 0 = không delay)',
+    message='Nội dung tin nhắn'
+)
+async def spamdm(interaction: discord.Interaction, user: discord.User, amount: int, delay: float, message: str):
+    user_id = interaction.user.id
     current_time = time.time()
     if user_id in last_command_times and current_time - last_command_times[user_id] < 3:
         embed = discord.Embed(
@@ -637,46 +641,139 @@ async def help(ctx):
             description="Vui lòng chờ 3 giây trước khi sử dụng lệnh tiếp theo.",
             color=0xFFFF00
         )
-        await ctx.send(embed=embed, delete_after=3)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     last_command_times[user_id] = current_time
 
-    embed = discord.Embed(
-        title="💗 Menu các lệnh của bot!!",
-        description="✨ **Prefix:** `b!`\n━━━━━━━━━━━━━━━━━━",
-        color=0xFFB6C1,
+    # Check if already spamming this user
+    if user.id in spam_tasks:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description=f"Đang spam {user.mention}! Dùng `/stopspamdm` để dừng trước khi spam lại.",
+            color=0xFF0000
+        )
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # Validate inputs
+    if amount <= 0 or amount > 100000:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Số lượng tin nhắn phải từ 1-100000!",
+            color=0xFF0000
+        )
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    if delay < 0:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Delay không được âm!",
+            color=0xFF0000
+        )
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    if len(message) > 2000:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Nội dung tin nhắn không được vượt quá 2000 ký tự!",
+            color=0xFF0000
+        )
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # Register spam task
+    spam_tasks[user.id] = {'stop': False, 'requester': user_id}
+
+    # Confirm start
+    start_embed = discord.Embed(
+        title="📨 BẮT ĐẦU SPAM DM",
+        description=f"🎯 **Target:** {user.mention}\n📊 **Số lượng:** {amount} tin nhắn\n⏱️ **Delay:** {delay} giây\n💬 **Nội dung:** {message[:100]}{'...' if len(message) > 100 else ''}\n\n🛑 **Dùng `/stopspamdm` để dừng spam**",
+        color=0x00FF00,
+        timestamp=datetime.datetime.now(LOCAL_TZ)
+    )
+    start_embed.set_footer(text=f"Khởi tạo bởi {interaction.user.name}",
+                           icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+    await interaction.response.send_message(embed=start_embed)
+
+    # Start spamming
+    success_count = 0
+    fail_count = 0
+    stopped_early = False
+
+    for i in range(amount):
+        # Check if stop requested
+        if spam_tasks[user.id]['stop']:
+            stopped_early = True
+            break
+
+        try:
+            await user.send(message)
+            success_count += 1
+
+            # Only sleep if delay > 0
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+        except discord.Forbidden:
+            fail_count += 1
+            break  # User has DMs closed
+        except discord.HTTPException as e:
+            fail_count += 1
+            # If rate limited, wait a bit
+            if e.status == 429:
+                await asyncio.sleep(1)
+        except Exception as e:
+            fail_count += 1
+            print(f"Error sending DM: {e}")
+
+    # Clean up task
+    if user.id in spam_tasks:
+        del spam_tasks[user.id]
+
+    # Send completion report
+    title = "🛑 SPAM BỊ DỪNG" if stopped_early else "✅ HOÀN THÀNH SPAM DM"
+    result_embed = discord.Embed(
+        title=title,
+        description=f"🎯 **Target:** {user.mention}\n✅ **Thành công:** {success_count}/{amount}\n❌ **Thất bại:** {fail_count}",
+        color=0xFFFF00 if stopped_early else (
+            0x00FF00 if fail_count == 0 else 0xFFFF00),
         timestamp=datetime.datetime.now(LOCAL_TZ)
     )
 
-    embed.add_field(
-        name="🎮 **VUI CHƠI**",
-        value="`b!roll [số]` - Lắc xúc xắc\n`b!8ball [câu hỏi]` - Hỏi 8ball\n`b!coinflip` - Tung xu\n`b!rps [kéo/búa/bao]` - Oẳn tù tì\n`b!meme` - Xem meme",
-        inline=False
+    if fail_count > 0:
+        result_embed.add_field(
+            name="⚠️ Lưu ý",
+            value="Một số tin nhắn không gửi được (có thể user đã tắt DM hoặc chặn bot)",
+            inline=False
+        )
+
+    result_embed.set_footer(text=f"Yêu cầu bởi {interaction.user.name}",
+                            icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+    await interaction.followup.send(embed=result_embed)
+
+
+@bot.tree.command(name='stopspamdm', description='Dừng spam DM đang chạy')
+@app_commands.describe(user='User đang bị spam cần dừng')
+async def stopspamdm(interaction: discord.Interaction, user: discord.User):
+    # Check if spam task exists for this user
+    if user.id not in spam_tasks:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description=f"Không có spam task nào đang chạy cho {user.mention}!",
+            color=0xFF0000
+        )
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # Mark task to stop
+    spam_tasks[user.id]['stop'] = True
+
+    embed = discord.Embed(
+        title="🛑 DỪNG SPAM",
+        description=f"Đang dừng spam DM cho {user.mention}...",
+        color=0xFFFF00,
+        timestamp=datetime.datetime.now(LOCAL_TZ)
     )
+    embed.set_footer(text=f"Yêu cầu bởi {interaction.user.name}",
+                     icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+    await interaction.response.send_message(embed=embed)
 
-    embed.add_field(
-        name="ℹ️ **THÔNG TIN**",
-        value="`b!userinfo [@user]` - Info người dùng\n`b!serverinfo` - Info server\n`b!avatar [@user]` - Xem avatar",
-        inline=False
-    )
-
-    embed.add_field(
-        name="🛠️ **QUẢN LÝ**",
-        value="`b!announce [nội dung]` - Thông báo\n`b!clear [số]` - Xóa tin nhắn",
-        inline=False
-    )
-
-    embed.add_field(
-        name="🤖 **TÍNH NĂNG TỰ ĐỘNG**",
-        value="• Bot sẽ tự động chào lại khi bạn chào!\n• Bot sẽ tự động gửi câu hỏi vui khi server vắng quá lâu (2 giờ)",
-        inline=False
-    )
-
-    embed.set_thumbnail(
-        url="https://media2.giphy.com/media/v1.Y2lkPTc5MGI3NjExZ3RwNGN0NW12NWNhZmtmZHhmdzcwcDVsNmRubnIzdW1ucWM1emZoaCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/JXibbAa7ysN9K/giphy.gif")
-    embed.set_footer(text="Made with 💕 by Bunvian",
-                     icon_url=bot.user.avatar.url if bot.user.avatar else None)
-
-    await ctx.send(embed=embed)
 
 bot.run(os.getenv('DISCORD_TOKEN'))
